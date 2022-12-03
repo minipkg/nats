@@ -1,4 +1,4 @@
-module mp_nats
+module github.com/minipkg/nats
 
 go 1.18
 
