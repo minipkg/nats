@@ -122,6 +122,7 @@ func main() {
 }
 
 func natsMsgHandler(msg *nats.Msg) {
+    msg.Ack()
 	fmt.Println(string(msg.Data))
 }
 ```
@@ -178,7 +179,7 @@ func main() {
 		}
 	}()
 
-	listenNatsSubscription(ctx, subs, 0)
+    err = listenNatsSubscription(ctx, subs, 0)
 	if err != nil {
 		log.Fatalf("listenNatsSubscription error: %q", err.Error()))
 		return
