@@ -1,6 +1,7 @@
 package mp_nats
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -14,6 +15,8 @@ type Config struct {
 	Servers             string
 	MaxReconnects       int
 	ReconnectWaitInSecs time.Duration
+	Login               string
+	Password            string
 }
 
 type Nats interface {
@@ -21,6 +24,7 @@ type Nats interface {
 	Js() gonats.JetStreamContext
 	Close()
 
+	IsStreamExists(name string) (bool, *gonats.StreamInfo, error)
 	AddStreamIfNotExists(config *gonats.StreamConfig) (*gonats.StreamInfo, error)
 	AddPushConsumerIfNotExists(streamName string, config *gonats.ConsumerConfig, msgHandler gonats.MsgHandler) (consumerInfo *gonats.ConsumerInfo, sub *gonats.Subscription, delConsumerAndSubscription func() error, err error)
 	AddPullConsumerIfNotExists(streamName string, config *gonats.ConsumerConfig) (consumerInfo *gonats.ConsumerInfo, sub *gonats.Subscription, delConsumerAndSubscription func() error, err error)
@@ -37,6 +41,7 @@ const (
 	defaultMaxBytes        = 1024 * 1024
 	defaultMaxRequestBatch = 1000
 	defaultMaxWait         = 3 * time.Second
+	duration               = 2 * time.Second
 )
 
 var defaultStreamConfig = &gonats.StreamConfig{
@@ -60,9 +65,7 @@ var defaultConsumerConfig = &gonats.ConsumerConfig{
 func New(config *Config) (Nats, error) {
 	var err error
 	n := &nats{}
-
-	n.conn, err = gonats.Connect(
-		config.Servers,
+	options := []gonats.Option{
 		gonats.MaxReconnects(config.MaxReconnects),
 		gonats.ReconnectWait(config.ReconnectWaitInSecs),
 		gonats.DisconnectErrHandler(func(nc *gonats.Conn, err error) {
@@ -74,7 +77,13 @@ func New(config *Config) (Nats, error) {
 		gonats.ClosedHandler(func(nc *gonats.Conn) {
 			fmt.Printf("Connection closed. Reason: %q\n", nc.LastError())
 		}),
-	)
+	}
+
+	if config.Login != "" && config.Password != "" {
+		options = append(options, gonats.UserInfo(config.Login, config.Password))
+	}
+
+	n.conn, err = gonats.Connect(config.Servers, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -99,22 +108,35 @@ func (n *nats) Close() {
 	n.conn.Close()
 }
 
+func (n *nats) IsStreamExists(name string) (bool, *gonats.StreamInfo, error) {
+	info, err := n.js.StreamInfo(name)
+	if err != nil {
+		if errors.Is(err, gonats.ErrStreamNotFound) {
+			return false, nil, nil
+		}
+		if err != nil {
+			return false, nil, err
+		}
+	}
+	return true, info, nil
+}
+
 func (n *nats) AddStreamIfNotExists(config *gonats.StreamConfig) (*gonats.StreamInfo, error) {
+	isStreamExists, info, err := n.IsStreamExists(config.Name)
+	if err != nil {
+		return nil, err
+	}
+
 	c, err := getStreamConfig(config)
 	if err != nil {
 		return nil, err
 	}
-	js := n.js
-	info, err := js.StreamInfo(c.Name)
-	if err != nil {
-		if errors.Is(err, gonats.ErrStreamNotFound) {
-			info, err = js.AddStream(c)
-		}
-		if err != nil {
-			return nil, err
-		}
+
+	if isStreamExists {
+		return info, nil
 	}
-	return info, nil
+
+	return n.js.AddStream(c)
 }
 
 func (n *nats) AddPushConsumerIfNotExists(streamName string, config *gonats.ConsumerConfig, msgHandler gonats.MsgHandler) (consumerInfo *gonats.ConsumerInfo, sub *gonats.Subscription, delConsumerAndSubscription func() error, err error) {
@@ -123,6 +145,35 @@ func (n *nats) AddPushConsumerIfNotExists(streamName string, config *gonats.Cons
 
 func (n *nats) AddPullConsumerIfNotExists(streamName string, config *gonats.ConsumerConfig) (consumerInfo *gonats.ConsumerInfo, sub *gonats.Subscription, delConsumerAndSubscription func() error, err error) {
 	return n.addConsumerIfNotExists(streamName, config, nil, false)
+}
+
+func PullSubscriptionProcessing(ctx context.Context, subs *gonats.Subscription, msgHandler gonats.MsgHandler, requestBatch uint) error {
+	if requestBatch == 0 {
+		requestBatch = defaultMaxRequestBatch
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
+
+		bmsgs, err := subs.Fetch(int(requestBatch), gonats.MaxWait(defaultMaxWait))
+		if err != nil {
+			if !errors.Is(err, gonats.ErrTimeout) {
+				return err
+			}
+			time.Sleep(duration)
+		}
+		for _, msg := range bmsgs {
+			if err = msg.Ack(); err != nil {
+				return err
+			}
+			msgHandler(msg)
+		}
+	}
+	return nil
 }
 
 func (n *nats) addConsumerIfNotExists(streamName string, config *gonats.ConsumerConfig, msgHandler gonats.MsgHandler, isPushConsumer bool) (consumerInfo *gonats.ConsumerInfo, sub *gonats.Subscription, delConsumerAndSubscription func() error, err error) {
