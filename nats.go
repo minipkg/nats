@@ -41,7 +41,7 @@ const (
 	defaultMaxBytes        = 1024 * 1024
 	defaultMaxRequestBatch = 1000
 	defaultMaxWait         = 3 * time.Second
-	duration               = 2 * time.Second
+	defaultDuration        = 2 * time.Second
 )
 
 var defaultStreamConfig = &gonats.StreamConfig{
@@ -147,7 +147,7 @@ func (n *nats) AddPullConsumerIfNotExists(streamName string, config *gonats.Cons
 	return n.addConsumerIfNotExists(streamName, config, nil, false)
 }
 
-func PullSubscriptionProcessing(ctx context.Context, subs *gonats.Subscription, msgHandler gonats.MsgHandler, requestBatch uint) error {
+func PullSubscriptionProcessing(ctx context.Context, subs *gonats.Subscription, msgHandler gonats.MsgHandler, duration time.Duration, requestBatch uint) error {
 	if requestBatch == 0 {
 		requestBatch = defaultMaxRequestBatch
 	}
